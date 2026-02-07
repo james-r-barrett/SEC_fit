@@ -62,6 +62,16 @@ Where:
 6.  Elution midpoints are used to calculate molecular weights using the
     calibration curve.
 
+### Example Chromatogram
+
+Here is a SEC trace with a Gaussian fitted to the elution peak:
+
+![Raw SEC Trace](screenshots/step1.png)
+
+Here is the same trace with the fitted mass, and the calibration also shown:
+
+![Fitted Peaks](screenshots/step2.png)
+
 ------------------------------------------------------------------------
 
 ## Calibration Information
