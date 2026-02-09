@@ -37,7 +37,7 @@ standards
 
 Clone the repository:
 
-    git clone github.com/james-r-barrett/SEC_fit
+    git clone https://github.com/james-r-barrett/SEC_Fit
     cd SEC_fit
 
 ------------------------------------------------------------------------
