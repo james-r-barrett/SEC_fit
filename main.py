@@ -365,7 +365,7 @@ if __name__ == "__main__":
         except ValueError:
             pass
 
-    calib_points = [
+    calib_points = [ ## from 50 mM Tris-HCl, 500 mM NaCl, pH 8.0
         (9.11, 669),
         (9.85, 550),
         (11.99, 150),
