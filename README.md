@@ -35,9 +35,10 @@ standards
 
 ## Installation
 
-Clone the repository:
+Clone the repository and install required:
 
     git clone https://github.com/james-r-barrett/SEC_Fit
+    pip install -r requirements.txt
     cd SEC_fit
 
 ------------------------------------------------------------------------

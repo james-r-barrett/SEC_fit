@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import matplotlib
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks, savgol_filter
+from columns import COLUMN_CONFIGS
 
 matplotlib.use('TkAgg')  # keep your GUI backend
 
@@ -26,8 +27,14 @@ def multi_gaussian(x, *params):
     return y
 
 
-def interactive_peak_fitting(x, y, existing_fits=None, smooth=True):
-
+def interactive_peak_fitting(
+    x,
+    y,
+    existing_fits=None,
+    smooth=True,
+    void_volume=None,
+    column_end=None
+):
     if smooth and len(y) > 11:
         y_smooth = savgol_filter(y, 11, 3)
     else:
@@ -44,6 +51,13 @@ def interactive_peak_fitting(x, y, existing_fits=None, smooth=True):
     ax.set_xlabel("Elution Volume (mL)")
     ax.set_ylabel("Absorbance (mAU)")
     ax.set_title("Click on missed peaks to fit Gaussian(s). Close window when done.")
+
+    if void_volume is not None:
+        ax.axvline(void_volume, color='purple', linestyle='--', label='Void volume')
+
+    if column_end is not None:
+        ax.axvline(column_end, color='gray', linestyle=':', label='Column End')
+
     ax.legend()
 
     def on_click(event):
@@ -75,7 +89,7 @@ def interactive_peak_fitting(x, y, existing_fits=None, smooth=True):
             )
             fits.append(popt)
             ax.plot(x, gaussian(x, *popt), '--', label=f'Peak @ {popt[1]:.2f} mL')
-            print(f"✅ Single Gaussian fit at {popt[1]:.2f} mL")
+            print(f"Single Gaussian fit at {popt[1]:.2f} mL")
 
         except Exception:
 
@@ -222,14 +236,20 @@ def analyze_sec(
     calib_points=None,
     calib_chrom_csv=None,
     peak_prominence=0.1,
-    baseline_fraction=(0.1, 0.3)
+    baseline_fraction=(0.1, 0.3),
+    void_volume=None,
+    mu_cutoff=None,
+    pre_void_fraction=0.10
 ):
 
     df = read_chromatogram(csv_path)
 
-    x = df["ml"].values - injection_volume + injection_size
-    mask = (x >= 0) & (x <= analysis_window)
+    x = df["ml"].values - injection_volume
+    plot_start = 0.0
+    if void_volume is not None:
+        plot_start = void_volume * (1 - pre_void_fraction)
 
+    mask = (x >= plot_start) & (x <= analysis_window)
     x = x[mask]
     y = df["mAU"].values[mask]
 
@@ -249,6 +269,16 @@ def analyze_sec(
             calib_x = calib_df['ml'].values
             calib_y = calib_df['mAU'].values
 
+            # apply same plotting window as experimental data
+            plot_start = 0.0
+            if void_volume is not None:
+                plot_start = max(void_volume * (1 - pre_void_fraction), 0.0)
+
+            calib_mask = (calib_x >= plot_start) & (calib_x <= analysis_window)
+
+            calib_x = calib_x[calib_mask]
+            calib_y = calib_y[calib_mask]
+
             scale_factor = (
                 np.nanmax(y_corrected) / np.nanmax(calib_y)
                 if np.nanmax(calib_y) != 0 else 1.0
@@ -260,8 +290,12 @@ def analyze_sec(
         except Exception as e:
             print(f"Could not read calibration chromatogram '{calib_chrom_csv}': {e}")
 
-    interactive_fits = interactive_peak_fitting(x, y_corrected)
-
+    interactive_fits = interactive_peak_fitting(
+        x,
+        y_corrected,
+        void_volume=void_volume,
+        column_end=analysis_window
+    )
     compute_mw = None
     if calib_points is not None:
         _, _, compute_mw = fit_calibration_from_points(calib_points)
@@ -287,7 +321,7 @@ def analyze_sec(
 
         y_peak = gaussian(mu, *fit)
 
-        if mu < 9.0:
+        if mu_cutoff is not None and mu < mu_cutoff:
             plt.plot(mu, y_peak, 'o', color='grey')
             mw_val = np.nan
         else:
@@ -317,11 +351,19 @@ def analyze_sec(
                 fontsize=9
             )
 
-    plt.axvline(8.51, color='purple', linestyle='--', label='Void volume')
-    plt.axvline(0, color='red', linestyle='--', label='Injection')
+    if void_volume is not None:
+        plt.axvline(void_volume, color='purple', linestyle='--', label='Void volume')
+    #plt.axvline(0, color='red', linestyle='--', label='Injection')
     plt.axvline(analysis_window, color='gray', linestyle=':', label='Column End')
 
-    plt.xlabel("Elution Volume (mL) relative to injection")
+    # enforce identical x-axis start
+    plot_start = 0.0
+    if void_volume is not None:
+        plot_start = void_volume * (1 - pre_void_fraction)
+
+    plt.xlim(plot_start, analysis_window)
+
+    plt.xlabel("Elution Volume (mL)")
     plt.ylabel("Absorbance (mAU, baseline-corrected)")
     plt.legend()
     plt.show()
@@ -344,11 +386,34 @@ import argparse
 
 if __name__ == "__main__":
 
+    SCRIPT_VERSION = "2.0.0-multicolumn"
+
+    print(f"\nSEC analysis script version: {SCRIPT_VERSION}\n")
+
     parser = argparse.ArgumentParser(
         description="Analyze an analytical SEC chromatogram."
     )
     parser.add_argument("csv_path")
     args = parser.parse_args()
+
+    print("\nSelect column used:")
+    for k, v in COLUMN_CONFIGS.items():
+        print(f"[{k}] {v['name']}")
+
+    while True:
+        try:
+            col_choice = int(input("Enter column index: "))
+            if col_choice in COLUMN_CONFIGS:
+                column_cfg = COLUMN_CONFIGS[col_choice]
+                break
+        except ValueError:
+            pass
+
+    print(f"\nUsing column: {column_cfg['name']}")
+
+    # ---------------------------------
+    # Injection volume selection
+    # ---------------------------------
 
     injection_volumes = parse_akta_injection_volumes(args.csv_path)
 
@@ -365,21 +430,24 @@ if __name__ == "__main__":
         except ValueError:
             pass
 
-    calib_points = [ ## from 50 mM Tris-HCl, 500 mM NaCl, pH 8.0
-        (9.11, 669),
-        (9.85, 550),
-        (11.99, 150),
-        (15, 44.3),
-        (17.5, 13.7)
-    ]
+    # ---------------------------------
+    # Run analysis
+    # ---------------------------------
+    print("\nRun parameters:")
+    for k, v in column_cfg.items():
+        if k != "calib_points":
+            print(f"  {k}: {v}")
 
     analyze_sec(
         csv_path=args.csv_path,
         injection_volume=injection_volume,
-        analysis_window=24.0,
+        analysis_window=column_cfg["analysis_window"],
         injection_size=0.1,
-        calib_points=calib_points,
-        calib_chrom_csv="calibration.csv",
+        calib_points=column_cfg["calib_points"],
+        calib_chrom_csv=column_cfg["calib_csv"],
         peak_prominence=2,
-        baseline_fraction=(0.1, 0.3)
+        baseline_fraction=(0.1, 0.3),
+        void_volume=column_cfg["void_volume"],
+        mu_cutoff=column_cfg["mu_cutoff"],
+        pre_void_fraction=column_cfg["pre_void_fraction"]
     )
