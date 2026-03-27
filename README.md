@@ -19,6 +19,7 @@ The program fits Gaussian peaks to chromatographic data and calculates molecular
 
 -   **Broad Compatibility:** Robustly auto-detects headers, encodings, and injection volumes from messy ÄKTA CSV exports.
 -   **Configurable Columns:** Easily switch between different SEC columns and calibration profiles via a centralized `columns.py` dictionary.
+-   **Fraction Collection Mapping (`main_auto.py`):** Automatically extracts fraction volumes and names, overlaying them onto a dedicated, dynamically zoomed subplot to pinpoint exactly where your target species eluted.
 -   **Interactive Fitting:** Click directly on your chromatogram to fit Gaussian models to specific peaks or shoulders.
 -   **Molecular Weight Estimation:** Automatically maps fitted peak elution volumes to a standard curve.
 -   **Advanced Deconvolution (`main_auto.py`):** Resolve complex, overlapping peaks with restricted global optimization, area-under-the-curve (AUC) relative abundance, and stoichiometry estimation.
@@ -52,14 +53,15 @@ Best for quick, single-peak analysis or well-separated species.
 4.  **Export:** Automatically saves a basic `_processed_plot.csv` containing the full elution volume and baseline-corrected absorbance for external plotting.
 
 ### Option 2: Advanced Deconvolution (`main_auto.py`)
-Best for overlapping peaks, quantifying relative abundance, or estimating oligomeric states.
+Best for overlapping peaks, quantifying relative abundance, estimating oligomeric states, and fraction mapping.
 
 1.  **Initialization:** Select your column and injection run as usual. 
-2.  **Stoichiometry (Optional):** Enter the expected molecular weight of your monomer (in kDa) to calculate oligomeric states ($n$), or press Enter to skip.
-3.  **Interactive Selection:** Click the peaks you want to fit.
-4.  **Global Refinement:** Upon closing the window, the script applies a restricted global optimization algorithm to fit all selected Gaussians *simultaneously*, properly deconvoluting overlapping areas.
-5.  **Results:** Generates a publication-style 3-panel figure showing the raw data with text annotations (Mass, Volume, Relative Abundance %, and Stoichiometry), a normalized calibration overlay, and the isolated Gaussian models.
-6.  **Export:** Saves an advanced `_processed_plot.csv` containing the raw data, baseline-corrected data, the combined additive fit, and the isolated curves for every individual modeled peak.
+2.  **Stoichiometry (Optional):** Enter the expected molecular weight of your monomer (in kDa) to calculate oligomeric states (n), or press Enter to skip.
+3.  **Fraction Mapping (Optional):** If fraction data is detected in your CSV, you will be prompted to plot them on an additional zoomed-in panel.
+4.  **Interactive Selection:** Click the peaks you want to fit.
+5.  **Global Refinement:** Upon closing the window, the script applies a restricted global optimization algorithm to fit all selected Gaussians *simultaneously*, properly deconvoluting overlapping areas.
+6.  **Results:** Generates a publication-style 3-panel (or 4-panel) figure showing the raw data with text annotations (Mass, Volume, Relative Abundance %, and Stoichiometry), a normalized calibration overlay, the isolated Gaussian models, and a dynamically zoomed fraction collection overlay.
+7.  **Export:** Saves an advanced `_modeled_peaks.csv` containing the raw data, baseline-corrected data, the combined additive fit, and the isolated curves for every individual modeled peak, alongside a `_full_trace.csv` for the entire run.
 
 ---
 
@@ -68,7 +70,7 @@ Best for overlapping peaks, quantifying relative abundance, or estimating oligom
 ![Raw SEC Trace](screenshots/auto_step1.png)
 
 **Final Deconvoluted Output (`main_auto.py`):**
-![Fitted Peaks](screenshots/auto_step2.png)
+![Fitted Peaks](screenshots/auto_step2a.png)
 
 ---
 
