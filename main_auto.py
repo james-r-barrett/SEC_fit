@@ -85,6 +85,7 @@ def interactive_peak_fitting(x, y, void_volume=None, column_end=None):
     fig.canvas.mpl_connect('button_press_event', on_click)
     redraw()
     plt.show()  # Manual phase ends when window is closed
+    plt.close(fig)  # <-- ADD THIS TO DESTROY THE GHOST
 
     # --- FINAL GLOBAL OPTIMIZATION ---
     # --- RESTRAINED GLOBAL OPTIMIZATION ---
@@ -233,6 +234,75 @@ def parse_akta_injection_volumes(file_path):
 
     return [0.0]
 
+
+def parse_akta_fractions(file_path):
+    """
+    Robustly extracts fraction names and their starting volumes from AKTA exports.
+    Works for both 'Fraction' and '(Fractions)' column naming conventions.
+    """
+    encodings = ['utf-8-sig', 'utf-8', 'utf-16', 'cp1252', 'latin1']
+    used_enc = 'latin1'
+
+    for enc in encodings:
+        try:
+            with open(file_path, 'r', encoding=enc) as f:
+                f.readline()
+            used_enc = enc
+            break
+        except Exception:
+            continue
+
+    header_row = None
+    with open(file_path, 'r', encoding=used_enc) as f:
+        for i, line in enumerate(f):
+            if 'mAU' in line and 'ml' in line:
+                header_row = i
+                break
+
+    if header_row is None:
+        return []
+
+    # Read the data matrix
+    df = pd.read_csv(
+        file_path, sep='\t', engine='python', encoding=used_enc,
+        skiprows=header_row, on_bad_lines='skip'
+    )
+
+    # Sometimes AKTA falls back to comma separated
+    frac_col = next((c for c in df.columns if 'fraction' in c.lower()), None)
+    if not frac_col:
+        df = pd.read_csv(
+            file_path, sep=None, engine='python', encoding=used_enc,
+            skiprows=header_row, on_bad_lines='skip'
+        )
+        frac_col = next((c for c in df.columns if 'fraction' in c.lower()), None)
+
+    if not frac_col:
+        return []
+
+    col_idx = df.columns.get_loc(frac_col)
+    if col_idx == 0:
+        return []
+
+    # The column immediately to the left is always the relative volume (mL)
+    vol_col = df.columns[col_idx - 1]
+
+    df_frac = df[[vol_col, frac_col]].dropna()
+    fractions = []
+
+    for _, row in df_frac.iterrows():
+        try:
+            v = float(row[vol_col])
+            name = str(row[frac_col]).strip(' "')  # Clean up surrounding quotes
+            if name.lower() not in ['nan', 'none', '']:
+                fractions.append((v, name))
+        except ValueError:
+            pass
+
+    # Ensure fractions are sorted by volume
+    fractions.sort(key=lambda x: x[0])
+    return fractions
+
 # ------------------------------
 # Calibration
 # ------------------------------
@@ -258,7 +328,8 @@ def analyze_sec(
     csv_path, injection_volume, analysis_window,
     calib_points=None, calib_chrom_csv=None, peak_prominence=0.1,
     baseline_fraction=(0.1, 0.3), void_volume=None, mu_cutoff=None,
-    pre_void_fraction=0.10, expected_mw=None
+    pre_void_fraction=0.10, expected_mw=None,
+    fractions=None
 ):
     df = read_chromatogram(csv_path)
 
@@ -358,16 +429,22 @@ def analyze_sec(
     y_norm = y_corrected / max_y
     total_fit_y_norm = total_fit_y / max_y
 
-    # Set up the 3-panel figure
-    fig = plt.figure(figsize=(12, 8))
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.5, 1])
+    # Set up the figure conditionally (add 4th plot if fractions exist)
+    if fractions is not None and len(fractions) > 0:
+        fig = plt.figure(figsize=(12, 12))
+        gs = fig.add_gridspec(3, 2, height_ratios=[1.5, 1, 1.5])
+        ax4 = fig.add_subplot(gs[2, :])
+    else:
+        fig = plt.figure(figsize=(12, 8))
+        gs = fig.add_gridspec(2, 2, height_ratios=[1.5, 1])
+        ax4 = None
 
     # --- AXIS 1 (Top Full Width): Raw Data + Peak Tops ---
     ax1 = fig.add_subplot(gs[0, :])
     ax1.plot(x, y_corrected, color='black', label='Experimental Data')
     ax1.set_title("Experimental Data with Identified Peaks")
     ax1.set_ylabel("Absorbance (mAU)")
-    ax1.set_ylim(bottom=min(y_corrected) - (0.05 * max_y), top=max_y * 1.4)
+    ax1.set_ylim(bottom=min(y_corrected) - (0.05 * max_y), top=max_y * 1.25)
 
     # --- AXIS 2 (Bottom Left): Calibration Overlay (Normalised) ---
     ax2 = fig.add_subplot(gs[1, 0])
@@ -385,18 +462,14 @@ def analyze_sec(
     for i, fit in enumerate(interactive_fits):
         a_fit, mu, sigma = fit
 
-        # 1. Plot dashed individual fits on Ax3 (Normalised)
         peak_curve = gaussian(x, *fit)
         ax3.plot(x, peak_curve / max_y, '--', alpha=0.7)
 
-        # 2. Find the exact height on the EXPERIMENTAL line for the dot
         y_actual = np.interp(mu, x, y_corrected)
         y_actual_norm = y_actual / max_y
 
-        # 3. Calculate Relative Abundance
         peak_area = areas[i]
         rel_abund = (peak_area / total_area) * 100
-
         stoichiometry = np.nan
 
         if mu_cutoff is not None and mu < mu_cutoff:
@@ -410,62 +483,125 @@ def analyze_sec(
             mw_val = compute_mw([mu])[0] if compute_mw else np.nan
 
             if compute_mw:
-                annotation_text = f'{mw_val:.1f} kDa\n({mu:.2f} mL)\n{rel_abund:.1f}%'
-
-                # Add stoichiometry if expected_mw is provided
+                annotation_text = f'{mw_val:.1f} kDa\n({mu:.2f} mL)'
                 if expected_mw is not None and not np.isnan(mw_val):
                     stoichiometry = mw_val / expected_mw
-                    annotation_text += f'\n(n={stoichiometry:.1f})'
+                    annotation_text += f'\n{rel_abund:.1f}%, n={stoichiometry:.1f}'
+                else:
+                    annotation_text += f'\n{rel_abund:.1f}%'
 
                 ax1.annotate(
-                    annotation_text,
-                    xy=(mu, y_actual),
-                    xytext=(0, 20),
-                    textcoords='offset points',
-                    ha='center', va='bottom', fontsize=9,
+                    annotation_text, xy=(mu, y_actual), xytext=(0, 20),
+                    textcoords='offset points', ha='center', va='bottom', fontsize=9,
                     arrowprops=dict(arrowstyle='-', color='gray', lw=0.5, alpha=0.7)
                 )
 
-        # Append data to results
         results.append((mu, mu, mw_val, peak_area, rel_abund, stoichiometry))
 
     # Add combined fit line to Ax3 (Normalised)
     if len(interactive_fits) > 0:
         ax3.plot(x, total_fit_y_norm, 'r-', linewidth=1.5, label='Combined Fit')
 
-    # Populate Ax2 (Calibration curve and points - Normalised)
+    # Populate Ax2 (Calibration)
     if calib_plot_x is not None:
-        ax2.plot(
-            calib_plot_x, calib_plot_y_scaled / max_y,
-            color='blue', alpha=0.3, label='Calibrant Data'
-        )
+        ax2.plot(calib_plot_x, calib_plot_y_scaled / max_y, color='blue', alpha=0.3, label='Calibrant Data')
     if calib_points is not None and calib_plot_x is not None:
         for ve, mw in calib_points:
             y_interp = np.interp(ve, calib_plot_x, calib_plot_y_scaled)
             ax2.plot(ve, y_interp / max_y, 'o', color='blue', alpha=0.5)
-            ax2.text(
-                ve, (y_interp / max_y) + 0.03,
-                f'{mw:.1f} kDa', ha='center', fontsize=8
-            )
+            ax2.text(ve, (y_interp / max_y) + 0.03, f'{mw:.1f} kDa', ha='center', fontsize=8)
+
+        # --- AXIS 4 (Bottom Full Width): Fractions (Optional) ---
+        plot_start = 0.0
+        if void_volume is not None:
+            plot_start = void_volume * (1 - pre_void_fraction)
+
+        if ax4 is not None:
+            # 1. Determine zoom window based on fitted peaks
+            if len(interactive_fits) > 0:
+                min_mu = min(f[1] for f in interactive_fits)
+                max_mu = max(f[1] for f in interactive_fits)
+                max_sigma = max(f[2] for f in interactive_fits)
+                buffer = max_sigma * 4  # Give a nice visual buffer around the peaks
+                zoom_start = max(plot_start, min_mu - buffer)
+                zoom_end = min(analysis_window, max_mu + buffer)
+            else:
+                zoom_start = plot_start
+                zoom_end = analysis_window
+
+            # 2. Scale Y axis dynamically to the zoomed region
+            mask_zoom = (x >= zoom_start) & (x <= zoom_end)
+            if mask_zoom.any():
+                zoom_max_y = np.max(y_corrected[mask_zoom])
+                zoom_min_y = np.min(y_corrected[mask_zoom])
+                y_buffer = (zoom_max_y - zoom_min_y) * 0.15
+                ax4.set_ylim(bottom=zoom_min_y - y_buffer, top=zoom_max_y + y_buffer)
+                text_y = zoom_max_y + (y_buffer * 0.7)
+            else:
+                ax4.set_ylim(bottom=min(y_corrected) - (0.05 * max_y), top=max_y * 1.25)
+                text_y = max_y * 1.15
+
+            # 3. Plot the data
+            ax4.plot(x, y_corrected, color='black', label='Experimental Data', alpha=0.8)
+            if len(interactive_fits) > 0:
+                ax4.plot(x, total_fit_y, 'r-', linewidth=1.5, label='Combined Fit')
+                for fit in interactive_fits:
+                    ax4.plot(x, gaussian(x, *fit), '--', alpha=0.5)
+
+            ax4.set_title("Fraction Collection (Zoomed to Peaks)")
+            ax4.set_ylabel("Absorbance (mAU)")
+            ax4.set_xlim(zoom_start, zoom_end)  # Apply the zoom!
+
+            # 4. Map the fractions
+            adj_fractions = [(v - injection_volume, name) for v, name in fractions]
+
+            # Pre-calculate intervals so we know exactly where each fraction ends
+            frac_intervals = []
+            for i, (v, name) in enumerate(adj_fractions):
+                v_next = adj_fractions[i + 1][0] if i + 1 < len(adj_fractions) else v + 2.0
+                frac_intervals.append((v, v_next, name))
+
+            # Filter for fractions that overlap our zoom window
+            valid_fracs = [(v, v_next, n) for v, v_next, n in frac_intervals if v_next > zoom_start and v < zoom_end]
+
+            for i, (v, v_next, name) in enumerate(valid_fracs):
+                ax4.axvline(v, color='green', linestyle='-', alpha=0.3)
+                ax4.axvspan(v, v_next, color='green', alpha=0.08 if i % 2 == 0 else 0.0)
+
+                # Center the text in the *visible* portion of the fraction tube
+                vis_start = max(v, zoom_start)
+                vis_end = min(v_next, zoom_end)
+                mid_v = (vis_start + vis_end) / 2
+
+                # clip_on=True ensures text doesn't spill past the graph borders
+                ax4.text(mid_v, text_y, name, rotation=90,
+                         ha='center', va='top', fontsize=8, color='darkgreen', clip_on=True)
 
     # --- Formatting for all axes ---
-    plot_start = 0.0
-    if void_volume is not None:
-        plot_start = void_volume * (1 - pre_void_fraction)
+    axes_list = [ax1, ax2, ax3]
+    if ax4 is not None:
+        axes_list.append(ax4)
 
-    for ax in [ax1, ax2, ax3]:
+    for ax in axes_list:
+        # Add column markers
         if void_volume is not None:
             ax.axvline(void_volume, color='purple', linestyle='--', alpha=0.5, label='Void Vol')
+        ax.axvline(analysis_window, color='gray', linestyle=':', alpha=0.5, label='Col End')
 
-        ax.set_xlim(plot_start, analysis_window)
+        # ONLY apply full-width xlim to the top three plots
+        if ax != ax4:
+            ax.set_xlim(plot_start, analysis_window)
+
         ax.set_xlabel("Elution Volume (mL)")
 
+        # Generate clean legends without duplicate labels
         handles, labels = ax.get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
         ax.legend(by_label.values(), by_label.keys(), fontsize='x-small')
 
     plt.tight_layout()
     plt.show()
+    plt.close(fig)  # Prevents the ghost window
 
     # --- EXPORT TO CSV ---
     base_name = os.path.splitext(csv_path)[0]
@@ -568,6 +704,17 @@ if __name__ == "__main__":
         user_expected_mw = None
 
     # ---------------------------------
+    # Fraction plotting selection
+    # ---------------------------------
+    fractions_found = parse_akta_fractions(args.csv_path)
+    user_fractions = None
+    if len(fractions_found) > 0:
+        print(f"\nFound {len(fractions_found)} fractions in the dataset.")
+        plot_frac = input("Would you like to plot them on a fourth graph? (y/n) [y]: ").strip().lower()
+        if plot_frac == '' or plot_frac == 'y':
+            user_fractions = fractions_found
+
+    # ---------------------------------
     # Run analysis
     # ---------------------------------
     print("\nRun parameters:")
@@ -589,5 +736,6 @@ if __name__ == "__main__":
         void_volume=column_cfg["void_volume"],
         mu_cutoff=column_cfg["mu_cutoff"],
         pre_void_fraction=column_cfg["pre_void_fraction"],
-        expected_mw=user_expected_mw  # <-- Pass it into the function here
+        expected_mw=user_expected_mw,
+        fractions=user_fractions  # <-- Pass it in here
     )
