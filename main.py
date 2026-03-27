@@ -405,7 +405,6 @@ def analyze_sec(
 
     if void_volume is not None:
         plt.axvline(void_volume, color='purple', linestyle='--', label='Void volume')
-    #plt.axvline(0, color='red', linestyle='--', label='Injection')
     plt.axvline(analysis_window, color='gray', linestyle=':', label='Column End')
 
     # enforce identical x-axis start
