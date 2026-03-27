@@ -64,9 +64,6 @@ Best for overlapping peaks, quantifying relative abundance, or estimating oligom
 ---
 
 ### Example Output
-
-*(Note: Add your screenshots to the `/screenshots` folder)*
-
 **Interactive Peak Selection:**
 ![Raw SEC Trace](screenshots/auto_step1.png)
 
