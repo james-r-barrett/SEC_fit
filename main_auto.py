@@ -26,7 +26,6 @@ def multi_gaussian(x, *params):
 
 
 def interactive_peak_fitting(x, y, void_volume=None, column_end=None):
-    # Use the 21-point smoothing you liked for the visual/residual
     y_smooth = savgol_filter(y, 21, 3) if len(y) > 21 else y
     fits = []
 
@@ -35,6 +34,10 @@ def interactive_peak_fitting(x, y, void_volume=None, column_end=None):
     def redraw():
         ax.clear()
         ax.plot(x, y_smooth, color='black', label='Chromatogram', alpha=0.8)
+
+        # Draw Void Volume if provided
+        if void_volume is not None:
+            ax.axvline(void_volume, color='purple', linestyle='--', alpha=0.5, label='Void Vol')
 
         total_fit = np.zeros_like(x)
         for i, f in enumerate(fits):
@@ -45,29 +48,38 @@ def interactive_peak_fitting(x, y, void_volume=None, column_end=None):
         if len(fits) > 0:
             ax.plot(x, total_fit, 'r-', linewidth=1.5, label='Total Model', alpha=0.5)
 
-        ax.set_title("1. Click Peaks (Largest to Smallest) | 2. Close Window for Global Refinement")
+        ax.set_title("1. Left Click: Fit Peak | 2. Right Click: Undo | 3. Press Enter to Finish")
         ax.legend(fontsize='x-small', ncol=2, loc='upper right')
         ax.set_xlabel("Volume (mL)")
         ax.set_ylabel("Absorbance (mAU)")
         fig.canvas.draw()
 
     def on_click(event):
-        if event.inaxes != ax or event.button != 1: return
+        if event.inaxes != ax: return
+
+        # --- UNDO on Right Click (Button 3) ---
+        if event.button == 3:
+            if len(fits) > 0:
+                fits.pop()
+                print("↩️ Undid last peak fit.")
+                redraw()
+            return
+
+        # --- ADD PEAK on Left Click (Button 1) ---
+        if event.button != 1: return
+
         x_click = event.xdata
 
-        # 1. Calculate Residual based on existing fits
         current_model = np.zeros_like(x)
         for f in fits:
             current_model += gaussian(x, *f)
         y_residual = y_smooth - current_model
 
-        # 2. Fit to the local residual
         window = 0.5
         mask = (x >= x_click - window) & (x <= x_click + window)
         if len(x[mask]) < 5: return
 
         try:
-            # Initial guess from residual
             a0 = max(y_residual[mask])
             mu0 = x[mask][np.argmax(y_residual[mask])]
 
@@ -82,12 +94,17 @@ def interactive_peak_fitting(x, y, void_volume=None, column_end=None):
         except Exception as e:
             print(f"❌ Residual fit failed: {e}")
 
-    fig.canvas.mpl_connect('button_press_event', on_click)
-    redraw()
-    plt.show()  # Manual phase ends when window is closed
-    plt.close(fig)  # <-- ADD THIS TO DESTROY THE GHOST
+    # --- PROGRESS on Enter Key ---
+    def on_key(event):
+        if event.key == 'enter':
+            plt.close(fig)
 
-    # --- FINAL GLOBAL OPTIMIZATION ---
+    fig.canvas.mpl_connect('button_press_event', on_click)
+    fig.canvas.mpl_connect('key_press_event', on_key)
+    redraw()
+
+    plt.show()  # Blocks until Enter is pressed (which calls plt.close)
+
     # --- RESTRAINED GLOBAL OPTIMIZATION ---
     if len(fits) > 1:
         print("🧬 Refining peaks (Restricted Mode)...")
@@ -95,8 +112,6 @@ def interactive_peak_fitting(x, y, void_volume=None, column_end=None):
 
         low_b, high_b = [], []
         for f in fits:
-            # ONLY allow the center (mu) to move 0.05 mL (one or two data points)
-            # This keeps the peak tip exactly where you clicked it.
             low_b += [f[0] * 0.8, f[1] - 0.05, f[2] * 0.7]
             high_b += [f[0] * 1.2, f[1] + 0.05, f[2] * 1.3]
 
@@ -109,7 +124,7 @@ def interactive_peak_fitting(x, y, void_volume=None, column_end=None):
             )
             return [list(popt_global[i:i + 3]) for i in range(0, len(popt_global), 3)]
         except:
-            return fits  # Fallback to your manual fits if it struggles
+            return fits
 
     return fits
 
@@ -329,7 +344,7 @@ def analyze_sec(
     calib_points=None, calib_chrom_csv=None, peak_prominence=0.1,
     baseline_fraction=(0.1, 0.3), void_volume=None, mu_cutoff=None,
     pre_void_fraction=0.10, expected_mw=None,
-    fractions=None
+    fractions=None, save_pdf=False  # <-- Added save_pdf here
 ):
     df = read_chromatogram(csv_path)
 
@@ -586,7 +601,6 @@ def analyze_sec(
         # Add column markers
         if void_volume is not None:
             ax.axvline(void_volume, color='purple', linestyle='--', alpha=0.5, label='Void Vol')
-        ax.axvline(analysis_window, color='gray', linestyle=':', alpha=0.5, label='Col End')
 
         # ONLY apply full-width xlim to the top three plots
         if ax != ax4:
@@ -600,8 +614,15 @@ def analyze_sec(
         ax.legend(by_label.values(), by_label.keys(), fontsize='x-small')
 
     plt.tight_layout()
+
+    if save_pdf:
+        base_name = os.path.splitext(csv_path)[0]
+        pdf_name = f"{base_name}_final_plot.pdf"
+        fig.savefig(pdf_name, bbox_inches='tight', format='pdf')
+        print(f"✅ Saved plot figure to: {pdf_name}")
+
     plt.show()
-    plt.close(fig)  # Prevents the ghost window
+    plt.close(fig)
 
     # --- EXPORT TO CSV ---
     base_name = os.path.splitext(csv_path)[0]
@@ -713,6 +734,13 @@ if __name__ == "__main__":
         plot_frac = input("Would you like to plot them on a fourth graph? (y/n) [y]: ").strip().lower()
         if plot_frac == '' or plot_frac == 'y':
             user_fractions = fractions_found
+
+    # ---------------------------------
+    # PDF Export selection
+    # ---------------------------------
+    print("\n(Optional) Export Plot:")
+    save_pdf_input = input("Would you like to save the final plot as a PDF? (y/n) [y]: ").strip().lower()
+    save_pdf_choice = save_pdf_input in ['', 'y', 'yes']
 
     # ---------------------------------
     # Run analysis
