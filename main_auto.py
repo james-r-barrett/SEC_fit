@@ -459,7 +459,7 @@ def analyze_sec(
     ax1.plot(x, y_corrected, color='black', label='Experimental Data')
     ax1.set_title("Experimental Data with Identified Peaks")
     ax1.set_ylabel("Absorbance (mAU)")
-    ax1.set_ylim(bottom=min(y_corrected) - (0.05 * max_y), top=max_y * 1.25)
+    ax1.set_ylim(bottom=min(y_corrected) - (0.05 * max_y), top=max_y * 1.4)
 
     # --- AXIS 2 (Bottom Left): Calibration Overlay (Normalised) ---
     ax2 = fig.add_subplot(gs[1, 0])
@@ -765,5 +765,6 @@ if __name__ == "__main__":
         mu_cutoff=column_cfg["mu_cutoff"],
         pre_void_fraction=column_cfg["pre_void_fraction"],
         expected_mw=user_expected_mw,
-        fractions=user_fractions  # <-- Pass it in here
+        fractions=user_fractions,
+        save_pdf=save_pdf_choice
     )
