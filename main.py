@@ -2,20 +2,18 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
+import os
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks, savgol_filter
 from columns import COLUMN_CONFIGS
 
-matplotlib.use('TkAgg')  # keep your GUI backend
-
+matplotlib.use('TkAgg')
 
 # ------------------------------
-# Helper Functions
+# Functions
 # ------------------------------
-
 def gaussian(x, a, mu, sigma):
     return a * np.exp(-(x - mu)**2 / (2 * sigma**2))
-
 
 def multi_gaussian(x, *params):
     """Sum of multiple Gaussians for fallback fitting."""
@@ -25,7 +23,6 @@ def multi_gaussian(x, *params):
         a, mu, sigma = params[3*i:3*(i+1)]
         y += gaussian(x, a, mu, sigma)
     return y
-
 
 def interactive_peak_fitting(
     x,
@@ -133,79 +130,122 @@ def interactive_peak_fitting(
 # ------------------------------
 # IO
 # ------------------------------
-
 def read_chromatogram(file_path):
+    """
+    Reads SEC data by automatically detecting the header row
+    (looks for a column containing 'mAU').
+    """
 
-    try:
-        with open(file_path, 'r', encoding='utf-16') as f:
-            lines = f.readlines()
-            encoding = 'utf-16'
-    except UnicodeError:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            encoding = 'utf-8'
+    # 1. Detect Encoding
+    encodings = ['utf-8-sig', 'utf-8', 'utf-16', 'cp1252', 'latin1']
+    used_enc = 'latin1'
 
-    start_idx = None
-
-    for i, line in enumerate(lines):
-
-        parts = line.replace(',', '\t').strip().split('\t')
-
-        if len(parts) < 2:
-            continue
-
+    for enc in encodings:
         try:
-            float(parts[0])
-            float(parts[1])
-            start_idx = i
+            with open(file_path, 'r', encoding=enc) as f:
+                f.readline()
+            used_enc = enc
             break
-        except ValueError:
+        except Exception:
             continue
 
-    if start_idx is None:
-        raise ValueError("Could not find where numeric data starts in the file.")
+    # 2. Find header row dynamically
+    header_row = None
+    with open(file_path, 'r', encoding=used_enc) as f:
+        for i, line in enumerate(f):
+            if 'mAU' in line:  # key condition
+                header_row = i
+                break
 
+    if header_row is None:
+        raise ValueError("Could not find header row containing 'mAU'")
+
+    # 3. Read with detected header
     df = pd.read_csv(
         file_path,
         sep=None,
         engine='python',
-        encoding=encoding,
-        skiprows=start_idx
+        encoding=used_enc,
+        skiprows=header_row,   # skip everything before header
+        on_bad_lines='skip'
     )
 
-    df = df.dropna(axis=0, how='all').dropna(axis=1, how='all')
+    # Auto-detect columns
+    ml_col = next((c for c in df.columns if c.lower().startswith('ml')), None)
+    mau_col = next((c for c in df.columns if 'mau' in c.lower()), None)
 
-    if df.shape[1] < 2:
-        raise ValueError("File still doesn't have two numeric columns — check format.")
+    if ml_col is None or mau_col is None:
+        raise ValueError(f"Could not find ml/mAU columns. Found: {df.columns}")
 
-    df = df.iloc[:, :2]
-    df.columns = ["ml", "mAU"]
-    df = df.apply(pd.to_numeric, errors='coerce').dropna()
+    df[ml_col] = pd.to_numeric(df[ml_col], errors='coerce')
+    df[mau_col] = pd.to_numeric(df[mau_col], errors='coerce')
+
+    # Standardise names
+    df = df.rename(columns={ml_col: 'ml', mau_col: 'mAU'})
 
     return df
 
 
 def parse_akta_injection_volumes(file_path):
+    """
+    Robustly extracts injection volumes from AKTA exports.
+    Works across different column layouts.
+    """
+    # 1. Detect Encoding
+    encodings = ['utf-8-sig', 'utf-8', 'utf-16', 'cp1252', 'latin1']
+    used_enc = 'latin1'
 
-    try:
-        df = pd.read_csv(file_path, encoding='utf-16', sep=None, engine='python', skiprows=2)
-    except UnicodeError:
-        df = pd.read_csv(file_path, encoding='utf-8', sep=None, engine='python', skiprows=2)
+    for enc in encodings:
+        try:
+            with open(file_path, 'r', encoding=enc) as f:
+                f.readline()
+            used_enc = enc
+            break
+        except Exception:
+            continue
 
-    col_candidates = [c for c in df.columns if "Injection" in c]
+    header_row = None
+    with open(file_path, 'r', encoding=used_enc) as f:
+        for i, line in enumerate(f):
+            if 'Injection' in line:  # key condition
+                header_row = i
+                break
 
-    if not col_candidates:
-        raise ValueError("No 'Injection' column found in the file.")
+    if header_row is None:
+        raise ValueError("Could not find header row containing 'injection'")
 
-    col_idx = df.columns.get_loc(col_candidates[0])
+    # 3. Read with detected header
+    df = pd.read_csv(
+        file_path,
+        sep='\t',
+        engine='python',
+        encoding=used_enc,
+        skiprows=header_row,   # skip everything before header
+        on_bad_lines='skip'
+    )
 
-    if col_idx == 0:
-        raise ValueError("No column to the left of the 'Injection' column.")
+    # Find injection-related columns
+    injection_cols = [c for c in df.columns if 'inject' in c.lower()]
 
-    values = pd.to_numeric(df.iloc[:, col_idx - 1], errors='coerce').dropna().values
+    if not injection_cols:
+        return [0.0]
 
-    return values
+    col = injection_cols[0]
+    col_idx = df.columns.get_loc(col)
 
+    # --- Try parsing THIS column first ---
+    vals = pd.to_numeric(df[col], errors='coerce').dropna()
+
+    if len(vals) > 0:
+        return vals.values
+
+    # --- Otherwise fallback to previous column ---
+    if col_idx > 0:
+        vals_prev = pd.to_numeric(df.iloc[:, col_idx - 1], errors='coerce').dropna()
+        if len(vals_prev) > 0:
+            return vals_prev.values
+
+    return [0.0]
 
 # ------------------------------
 # Calibration
@@ -229,38 +269,50 @@ def fit_calibration_from_points(calib_points):
 # ------------------------------
 
 def analyze_sec(
-    csv_path,
-    injection_volume,
-    analysis_window,
-    injection_size,
-    calib_points=None,
-    calib_chrom_csv=None,
-    peak_prominence=0.1,
-    baseline_fraction=(0.1, 0.3),
-    void_volume=None,
-    mu_cutoff=None,
+    csv_path, injection_volume, analysis_window,
+    calib_points=None, calib_chrom_csv=None, peak_prominence=0.1,
+    baseline_fraction=(0.1, 0.3), void_volume=None, mu_cutoff=None,
     pre_void_fraction=0.10
 ):
-
     df = read_chromatogram(csv_path)
 
-    x = df["ml"].values - injection_volume
+    x_raw = df["ml"].values
+    x_raw = x_raw - injection_volume
+    y_raw = df["mAU"].values
+
     plot_start = 0.0
     if void_volume is not None:
         plot_start = void_volume * (1 - pre_void_fraction)
+        print("This is plot start: "+str(plot_start))
 
-    mask = (x >= plot_start) & (x <= analysis_window)
-    x = x[mask]
-    y = df["mAU"].values[mask]
+    mask = (x_raw >= plot_start) & (x_raw <= analysis_window)
+    x = x_raw[mask]
+    y = y_raw[mask]
 
+    # Baseline correction
     start_frac, end_frac = baseline_fraction
-
     baseline_mask = (x >= analysis_window * start_frac) & (x <= analysis_window * end_frac)
-
     baseline_value = np.mean(y[baseline_mask]) if baseline_mask.sum() > 0 else 0.0
     y_corrected = y - baseline_value
 
-    calib_plot_x = calib_plot_y_scaled = None
+    # --- FULL DATA (for export) ---
+    mask_full = (x_raw >= 0) & (x_raw <= analysis_window)
+    x_full = x_raw[mask_full]
+    y_full = y_raw[mask_full]
+
+    # Apply SAME baseline correction
+    y_full_corrected = y_full - baseline_value
+
+    # --- SAVE FULL DATA TO CSV ---
+    base_name = os.path.splitext(csv_path)[0]
+    export_name = f"{base_name}_processed_plot.csv"
+
+    pd.DataFrame({
+        "mL": x_full,
+        "mAU_corrected": y_full_corrected
+    }).to_csv(export_name, index=False)
+
+    print(f"✅ Exported FULL plot data to: {export_name}")
 
     if calib_chrom_csv is not None:
         try:
@@ -442,7 +494,6 @@ if __name__ == "__main__":
         csv_path=args.csv_path,
         injection_volume=injection_volume,
         analysis_window=column_cfg["analysis_window"],
-        injection_size=0.1,
         calib_points=column_cfg["calib_points"],
         calib_chrom_csv=column_cfg["calib_csv"],
         peak_prominence=2,
