@@ -32,8 +32,8 @@ def interactive_peak_fitting(
     void_volume=None,
     column_end=None
 ):
-    if smooth and len(y) > 11:
-        y_smooth = savgol_filter(y, 11, 3)
+    if smooth and len(y) > 21:
+        y_smooth = savgol_filter(y, 21, 3)
     else:
         y_smooth = y
 
@@ -58,64 +58,43 @@ def interactive_peak_fitting(
     ax.legend()
 
     def on_click(event):
-
         if event.inaxes != ax:
             return
 
         x_click = event.xdata
-
-        window = max((x[-1] - x[0]) / 40, 0.5)
+        # Narrow the window slightly for messy data to focus on the specific shoulder
+        window = max((x[-1] - x[0]) / 50, 0.3)
         mask = (x >= x_click - window) & (x <= x_click + window)
         x_window, y_window = x[mask], y_smooth[mask]
 
-        if len(x_window) < 3:
-            print(f"Not enough points around {x_click:.2f} mL.")
+        if len(x_window) < 5:
             return
 
         a0 = max(y_window)
         mu0 = x_window[np.argmax(y_window)]
-        sigma0 = max((x_window[-1] - x_window[0]) / 4.0, 0.01)
+        # Initial guess for sigma (peak width)
+        sigma0 = 0.2
 
         try:
+            # BOUNDS: [min_a, min_mu, min_sigma], [max_a, max_mu, max_sigma]
+            # Sigma is restricted between 0.05mL (sharp) and 1.5mL (broad)
+            lower_b = [0, x_click - 0.5, 0.05]
+            upper_b = [a0 * 2, x_click + 0.5, 1.5]
+
             popt, _ = curve_fit(
                 gaussian,
                 x_window,
                 y_window,
                 p0=[a0, mu0, sigma0],
-                maxfev=4000
+                bounds=(lower_b, upper_b),
+                maxfev=5000
             )
             fits.append(popt)
-            ax.plot(x, gaussian(x, *popt), '--', label=f'Peak @ {popt[1]:.2f} mL')
-            print(f"Single Gaussian fit at {popt[1]:.2f} mL")
+            ax.plot(x, gaussian(x, *popt), '--', linewidth=1.5, label=f'Peak @ {popt[1]:.2f}')
+            print(f"✅ Fit peak at {popt[1]:.2f} mL")
 
-        except Exception:
-
-            peaks, _ = find_peaks(y_window, prominence=(a0*0.05))
-
-            if len(peaks) >= 2:
-                print(f"⚠️  Trying double Gaussian fit near {x_click:.2f} mL")
-
-                params0 = []
-                for px in x_window[peaks[:2]]:
-                    params0 += [max(y_window), px, sigma0]
-
-                try:
-                    popt2, _ = curve_fit(
-                        multi_gaussian,
-                        x_window,
-                        y_window,
-                        p0=params0,
-                        maxfev=8000
-                    )
-                    fits.append(popt2[:3])
-                    fits.append(popt2[3:6])
-                    ax.plot(x, multi_gaussian(x, *popt2), '--')
-                    print(f"✅ Double Gaussian fit near {x_click:.2f} mL")
-
-                except Exception as e:
-                    print(f"❌ Could not fit multiple peaks near {x_click:.2f}: {e}")
-            else:
-                print(f"❌ Failed to fit around {x_click:.2f} mL")
+        except Exception as e:
+            print(f"❌ Fit failed: {e}")
 
         fig.canvas.draw()
 
