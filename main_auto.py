@@ -29,6 +29,11 @@ def interactive_peak_fitting(x, y, void_volume=None, column_end=None):
     y_smooth = savgol_filter(y, 21, 3) if len(y) > 21 else y
     fits = []
 
+    # Create a dynamic scaling factor based on column volume.
+    # Assuming a ~24 mL column is the 1.0 baseline.
+    col_vol = column_end if column_end is not None else 24.0
+    scale = col_vol / 24.0
+
     fig, ax = plt.subplots(figsize=(12, 6))
 
     def redraw():
@@ -75,7 +80,8 @@ def interactive_peak_fitting(x, y, void_volume=None, column_end=None):
             current_model += gaussian(x, *f)
         y_residual = y_smooth - current_model
 
-        window = 0.5
+        # Scale the data slice window dynamically!
+        window = 0.6 * scale
         mask = (x >= x_click - window) & (x <= x_click + window)
         if len(x[mask]) < 5: return
 
@@ -83,10 +89,14 @@ def interactive_peak_fitting(x, y, void_volume=None, column_end=None):
             a0 = max(y_residual[mask])
             mu0 = x[mask][np.argmax(y_residual[mask])]
 
+            # Scale the bounds and initial guesses dynamically!
             popt, _ = curve_fit(
                 gaussian, x[mask], y_residual[mask],
-                p0=[a0, mu0, 0.15],
-                bounds=([0, x_click - 0.3, 0.05], [a0 * 2, x_click + 0.3, 0.8]),
+                p0=[a0, mu0, 0.15 * scale],
+                bounds=(
+                    [0, x_click - (0.4 * scale), 0.05 * scale],
+                    [a0 * 2, x_click + (0.4 * scale), 1.0 * scale]
+                ),
                 maxfev=5000
             )
             fits.append(popt)
@@ -112,8 +122,9 @@ def interactive_peak_fitting(x, y, void_volume=None, column_end=None):
 
         low_b, high_b = [], []
         for f in fits:
-            low_b += [f[0] * 0.8, f[1] - 0.05, f[2] * 0.7]
-            high_b += [f[0] * 1.2, f[1] + 0.05, f[2] * 1.3]
+            # Scale the global refinement bounds!
+            low_b += [f[0] * 0.8, f[1] - (0.1 * scale), f[2] * 0.7]
+            high_b += [f[0] * 1.2, f[1] + (0.1 * scale), f[2] * 1.3]
 
         try:
             popt_global, _ = curve_fit(
