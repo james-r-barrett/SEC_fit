@@ -25,6 +25,92 @@ def multi_gaussian(x, *params):
     return y
 
 
+def estimate_baseline(x, y, void_volume=None, analysis_window=None,
+                      method='percentile_ends', percentile=10):
+    """
+    Robust baseline estimation for SEC chromatograms.
+
+    Methods
+    -------
+    'percentile_ends' (default)
+        Takes the lowest `percentile`% of signal from the first and last
+        10% of the elution window and fits a linear baseline through them.
+        Robust against peaks sitting anywhere in the trace.
+
+    'rolling_minimum'
+        Slides a wide window across the trace, takes the minimum in each
+        window, then smooths.  Good when the baseline drifts non-linearly.
+
+    'flat_end'
+        Uses only the tail of the trace (last 15% of analysis window) as
+        a flat baseline estimate.  Simple and reliable when the end of
+        the run is always baseline.
+
+    Returns
+    -------
+    baseline : np.ndarray  same length as x
+    method_used : str
+    """
+
+    n = len(y)
+
+    if method == 'percentile_ends':
+        # Use the first and last 10 % of the x-range, take the median of
+        # the lower half of points in each region — less sensitive to any
+        # residual peaks than a plain mean.
+        x_range = x[-1] - x[0]
+        edge = 0.10 * x_range
+
+        left_mask  = x <= x[0] + edge
+        right_mask = x >= x[-1] - edge
+
+        def _robust_level(mask):
+            vals = y[mask]
+            if len(vals) == 0:
+                return np.nan
+            thresh = np.percentile(vals, percentile)
+            robust_vals = vals[vals <= thresh * 1.5 + 1e-9]
+            return np.median(robust_vals) if len(robust_vals) > 0 else np.median(vals)
+
+        y_left  = _robust_level(left_mask)
+        y_right = _robust_level(right_mask)
+
+        x_left  = np.mean(x[left_mask])  if left_mask.any()  else x[0]
+        x_right = np.mean(x[right_mask]) if right_mask.any() else x[-1]
+
+        if np.isnan(y_left) or np.isnan(y_right):
+            # Fallback: flat median of all signal below the 10th percentile
+            baseline = np.full_like(y, np.percentile(y, percentile))
+            return baseline, 'percentile_flat_fallback'
+
+        # Linear interpolation between left and right anchor
+        slope = (y_right - y_left) / max(x_right - x_left, 1e-9)
+        baseline = y_left + slope * (x - x_left)
+        return baseline, 'percentile_ends_linear'
+
+    elif method == 'rolling_minimum':
+        # Window width = ~5 % of trace length (at least 5 points)
+        win = max(5, int(0.05 * n))
+        rolled = pd.Series(y).rolling(win, center=True, min_periods=1).min().values
+        # Smooth the rolling minimum
+        smooth_win = max(5, int(0.10 * n))
+        if smooth_win % 2 == 0:
+            smooth_win += 1
+        baseline = savgol_filter(rolled, smooth_win, 2)
+        return baseline, 'rolling_minimum'
+
+    elif method == 'flat_end':
+        tail_mask = x >= x[-1] - 0.15 * (x[-1] - x[0])
+        if tail_mask.sum() < 3:
+            tail_mask = np.ones(len(x), dtype=bool)
+        val = np.percentile(y[tail_mask], percentile)
+        baseline = np.full_like(y, val)
+        return baseline, 'flat_end'
+
+    else:
+        raise ValueError(f"Unknown baseline method: {method!r}")
+
+
 def interactive_peak_fitting(x, y, void_volume=None, column_end=None):
     y_smooth = savgol_filter(y, 21, 3) if len(y) > 21 else y
     fits = []
@@ -353,9 +439,9 @@ def fit_calibration_from_points(calib_points):
 def analyze_sec(
     csv_path, injection_volume, analysis_window,
     calib_points=None, calib_chrom_csv=None, peak_prominence=0.1,
-    baseline_fraction=(0.1, 0.3), void_volume=None, mu_cutoff=None,
+    baseline_method='percentile_ends', void_volume=None, mu_cutoff=None,
     pre_void_fraction=0.10, expected_mw=None,
-    fractions=None, save_pdf=False  # <-- Added save_pdf here
+    fractions=None, save_pdf=False
 ):
     df = read_chromatogram(csv_path)
 
@@ -366,96 +452,103 @@ def analyze_sec(
     plot_start = 0.0
     if void_volume is not None:
         plot_start = void_volume * (1 - pre_void_fraction)
-        print("This is plot start: "+str(plot_start))
+        print(f"Plot start: {plot_start:.3f} mL")
 
     mask = (x_raw >= plot_start) & (x_raw <= analysis_window)
     x = x_raw[mask]
     y = y_raw[mask]
 
-    # Baseline correction
-    start_frac, end_frac = baseline_fraction
-    baseline_mask = (x >= analysis_window * start_frac) & (x <= analysis_window * end_frac)
-    baseline_value = np.mean(y[baseline_mask]) if baseline_mask.sum() > 0 else 0.0
-    y_corrected = y - baseline_value
+    # ------------------------------------------------------------------
+    # Robust baseline correction
+    # ------------------------------------------------------------------
+    baseline, method_used = estimate_baseline(
+        x, y,
+        void_volume=void_volume,
+        analysis_window=analysis_window,
+        method=baseline_method
+    )
+    y_corrected = y - baseline
+    print(f"✅ Baseline correction applied ({method_used})")
 
     # --- FULL DATA (for export) ---
     mask_full = (x_raw >= 0) & (x_raw <= analysis_window)
     x_full = x_raw[mask_full]
     y_full = y_raw[mask_full]
 
-    # Apply SAME baseline correction
-    y_full_corrected = y_full - baseline_value
+    # Apply same baseline to the full export range by recomputing over x_full
+    baseline_full, _ = estimate_baseline(
+        x_full, y_full,
+        void_volume=void_volume,
+        analysis_window=analysis_window,
+        method=baseline_method
+    )
+    y_full_corrected = y_full - baseline_full
 
-    # --- SAVE FULL DATA TO CSV ---
-    base_name = os.path.splitext(csv_path)[0]
-    export_name = f"{base_name}_processed_plot.csv"
-
-    pd.DataFrame({
-        "mL": x_full,
-        "mAU_corrected": y_full_corrected
-    }).to_csv(export_name, index=False)
-
-    print(f"✅ Exported FULL plot data to: {export_name}")
+    # ------------------------------------------------------------------
+    # Calibration chromatogram — load BEFORE the main plot is drawn
+    # ------------------------------------------------------------------
+    calib_plot_x = None
+    calib_plot_y_scaled = None
 
     if calib_chrom_csv is not None:
         try:
             calib_df = read_chromatogram(calib_chrom_csv)
 
-            calib_x = calib_df['ml'].values
-            calib_y = calib_df['mAU'].values
+            calib_x_raw = calib_df['ml'].values
+            calib_y_raw = calib_df['mAU'].values
 
-            # apply same plotting window as experimental data
-            plot_start = 0.0
+            calib_plot_start = 0.0
             if void_volume is not None:
-                plot_start = max(void_volume * (1 - pre_void_fraction), 0.0)
+                calib_plot_start = max(void_volume * (1 - pre_void_fraction), 0.0)
 
-            calib_mask = (calib_x >= plot_start) & (calib_x <= analysis_window)
-
-            calib_x = calib_x[calib_mask]
-            calib_y = calib_y[calib_mask]
+            calib_mask = (calib_x_raw >= calib_plot_start) & (calib_x_raw <= analysis_window)
+            calib_plot_x = calib_x_raw[calib_mask]
+            calib_y     = calib_y_raw[calib_mask]
 
             scale_factor = (
                 np.nanmax(y_corrected) / np.nanmax(calib_y)
                 if np.nanmax(calib_y) != 0 else 1.0
             )
-
-            calib_plot_x = calib_x
             calib_plot_y_scaled = calib_y * scale_factor
 
         except Exception as e:
-            print(f"Could not read calibration chromatogram '{calib_chrom_csv}': {e}")
+            print(f"⚠️  Could not read calibration chromatogram '{calib_chrom_csv}': {e}")
 
+    # ------------------------------------------------------------------
+    # Interactive peak fitting
+    # ------------------------------------------------------------------
     interactive_fits = interactive_peak_fitting(
         x,
         y_corrected,
         void_volume=void_volume,
         column_end=analysis_window
     )
+
     compute_mw = None
     if calib_points is not None:
         _, _, compute_mw = fit_calibration_from_points(calib_points)
 
     results = []
 
-    # 1. Calculate combined fit and individual areas first
+    # Calculate combined fit and individual areas
     total_fit_y = np.zeros_like(x)
     areas = []
     for fit in interactive_fits:
         total_fit_y += gaussian(x, *fit)
-
-        # Area = a * sigma * sqrt(2*pi)
         a_fit, mu, sigma = fit
         peak_area = a_fit * sigma * np.sqrt(2 * np.pi)
         areas.append(peak_area)
 
     total_area = sum(areas) if len(areas) > 0 else 1.0
 
-    # Calculate Normalization Factor for bottom plots
+    # Normalisation for bottom plots
     max_y = np.max(y_corrected) if np.max(y_corrected) != 0 else 1.0
     y_norm = y_corrected / max_y
     total_fit_y_norm = total_fit_y / max_y
 
-    # Set up the figure conditionally (add 4th plot if fractions exist)
+    # ------------------------------------------------------------------
+    # Figure layout — ax4 is ALWAYS independent of calib_points
+    # ------------------------------------------------------------------
     if fractions is not None and len(fractions) > 0:
         fig = plt.figure(figsize=(12, 12))
         gs = fig.add_gridspec(3, 2, height_ratios=[1.5, 1, 1.5])
@@ -498,6 +591,11 @@ def analyze_sec(
         rel_abund = (peak_area / total_area) * 100
         stoichiometry = np.nan
 
+        # Ve_abs = volume after injection-volume subtraction (= mu)
+        # Ve_rel = volume relative to void volume (elution inside column)
+        ve_abs = mu
+        ve_rel = (mu - void_volume) if void_volume is not None else mu
+
         if mu_cutoff is not None and mu < mu_cutoff:
             ax1.plot(mu, y_actual, 'o', color='grey')
             ax2.plot(mu, y_actual_norm, 'o', color='grey')
@@ -522,86 +620,90 @@ def analyze_sec(
                     arrowprops=dict(arrowstyle='-', color='gray', lw=0.5, alpha=0.7)
                 )
 
-        results.append((mu, mu, mw_val, peak_area, rel_abund, stoichiometry))
+        results.append((ve_rel, ve_abs, mw_val, peak_area, rel_abund, stoichiometry))
 
     # Add combined fit line to Ax3 (Normalised)
     if len(interactive_fits) > 0:
         ax3.plot(x, total_fit_y_norm, 'r-', linewidth=1.5, label='Combined Fit')
 
-    # Populate Ax2 (Calibration)
-    if calib_plot_x is not None:
-        ax2.plot(calib_plot_x, calib_plot_y_scaled / max_y, color='blue', alpha=0.3, label='Calibrant Data')
-    if calib_points is not None and calib_plot_x is not None:
-        for ve, mw in calib_points:
-            y_interp = np.interp(ve, calib_plot_x, calib_plot_y_scaled)
-            ax2.plot(ve, y_interp / max_y, 'o', color='blue', alpha=0.5)
-            ax2.text(ve, (y_interp / max_y) + 0.03, f'{mw:.1f} kDa', ha='center', fontsize=8)
+    # Populate Ax2 (Calibration)  — guarded against calib_plot_x being None
+    if calib_plot_x is not None and calib_plot_y_scaled is not None:
+        ax2.plot(calib_plot_x, calib_plot_y_scaled / max_y,
+                 color='blue', alpha=0.3, label='Calibrant Data')
+        if calib_points is not None:
+            for ve, mw in calib_points:
+                y_interp = np.interp(ve, calib_plot_x, calib_plot_y_scaled)
+                ax2.plot(ve, y_interp / max_y, 'o', color='blue', alpha=0.5)
+                ax2.text(ve, (y_interp / max_y) + 0.03, f'{mw:.1f} kDa',
+                         ha='center', fontsize=8)
 
-        # --- AXIS 4 (Bottom Full Width): Fractions (Optional) ---
-        plot_start = 0.0
+    # ------------------------------------------------------------------
+    # AXIS 4 (Bottom Full Width): Fractions — independent of calib block
+    # ------------------------------------------------------------------
+    if ax4 is not None:
+        plot_start_frac = 0.0
         if void_volume is not None:
-            plot_start = void_volume * (1 - pre_void_fraction)
+            plot_start_frac = void_volume * (1 - pre_void_fraction)
 
-        if ax4 is not None:
-            # 1. Determine zoom window based on fitted peaks
-            if len(interactive_fits) > 0:
-                min_mu = min(f[1] for f in interactive_fits)
-                max_mu = max(f[1] for f in interactive_fits)
-                max_sigma = max(f[2] for f in interactive_fits)
-                buffer = max_sigma * 4  # Give a nice visual buffer around the peaks
-                zoom_start = max(plot_start, min_mu - buffer)
-                zoom_end = min(analysis_window, max_mu + buffer)
-            else:
-                zoom_start = plot_start
-                zoom_end = analysis_window
+        # 1. Determine zoom window based on fitted peaks
+        if len(interactive_fits) > 0:
+            min_mu = min(f[1] for f in interactive_fits)
+            max_mu = max(f[1] for f in interactive_fits)
+            max_sigma = max(f[2] for f in interactive_fits)
+            buffer = max_sigma * 4
+            zoom_start = max(plot_start_frac, min_mu - buffer)
+            zoom_end   = min(analysis_window,  max_mu + buffer)
+        else:
+            zoom_start = plot_start_frac
+            zoom_end   = analysis_window
 
-            # 2. Scale Y axis dynamically to the zoomed region
-            mask_zoom = (x >= zoom_start) & (x <= zoom_end)
-            if mask_zoom.any():
-                zoom_max_y = np.max(y_corrected[mask_zoom])
-                zoom_min_y = np.min(y_corrected[mask_zoom])
-                y_buffer = (zoom_max_y - zoom_min_y) * 0.15
-                ax4.set_ylim(bottom=zoom_min_y - y_buffer, top=zoom_max_y + y_buffer)
-                text_y = zoom_max_y + (y_buffer * 0.7)
-            else:
-                ax4.set_ylim(bottom=min(y_corrected) - (0.05 * max_y), top=max_y * 1.25)
-                text_y = max_y * 1.15
+        # 2. Scale Y axis dynamically to the zoomed region
+        mask_zoom = (x >= zoom_start) & (x <= zoom_end)
+        if mask_zoom.any():
+            zoom_max_y = np.max(y_corrected[mask_zoom])
+            zoom_min_y = np.min(y_corrected[mask_zoom])
+            y_buffer = (zoom_max_y - zoom_min_y) * 0.15
+            ax4.set_ylim(bottom=zoom_min_y - y_buffer, top=zoom_max_y + y_buffer)
+            text_y = zoom_max_y + (y_buffer * 0.7)
+        else:
+            ax4.set_ylim(bottom=min(y_corrected) - (0.05 * max_y), top=max_y * 1.25)
+            text_y = max_y * 1.15
 
-            # 3. Plot the data
-            ax4.plot(x, y_corrected, color='black', label='Experimental Data', alpha=0.8)
-            if len(interactive_fits) > 0:
-                ax4.plot(x, total_fit_y, 'r-', linewidth=1.5, label='Combined Fit')
-                for fit in interactive_fits:
-                    ax4.plot(x, gaussian(x, *fit), '--', alpha=0.5)
+        # 3. Plot the data
+        ax4.plot(x, y_corrected, color='black', label='Experimental Data', alpha=0.8)
+        if len(interactive_fits) > 0:
+            ax4.plot(x, total_fit_y, 'r-', linewidth=1.5, label='Combined Fit')
+            for fit in interactive_fits:
+                ax4.plot(x, gaussian(x, *fit), '--', alpha=0.5)
 
-            ax4.set_title("Fraction Collection (Zoomed to Peaks)")
-            ax4.set_ylabel("Absorbance (mAU)")
-            ax4.set_xlim(zoom_start, zoom_end)  # Apply the zoom!
+        ax4.set_title("Fraction Collection (Zoomed to Peaks)")
+        ax4.set_ylabel("Absorbance (mAU)")
+        ax4.set_xlim(zoom_start, zoom_end)
 
-            # 4. Map the fractions
-            adj_fractions = [(v - injection_volume, name) for v, name in fractions]
+        # 4. Map the fractions
+        adj_fractions = [(v - injection_volume, name) for v, name in fractions]
 
-            # Pre-calculate intervals so we know exactly where each fraction ends
-            frac_intervals = []
-            for i, (v, name) in enumerate(adj_fractions):
-                v_next = adj_fractions[i + 1][0] if i + 1 < len(adj_fractions) else v + 2.0
-                frac_intervals.append((v, v_next, name))
+        frac_intervals = []
+        for i, (v, name) in enumerate(adj_fractions):
+            v_next = adj_fractions[i + 1][0] if i + 1 < len(adj_fractions) else v + 2.0
+            frac_intervals.append((v, v_next, name))
 
-            # Filter for fractions that overlap our zoom window
-            valid_fracs = [(v, v_next, n) for v, v_next, n in frac_intervals if v_next > zoom_start and v < zoom_end]
+        valid_fracs = [
+            (v, v_next, n) for v, v_next, n in frac_intervals
+            if v_next > zoom_start and v < zoom_end
+        ]
 
-            for i, (v, v_next, name) in enumerate(valid_fracs):
-                ax4.axvline(v, color='green', linestyle='-', alpha=0.3)
-                ax4.axvspan(v, v_next, color='green', alpha=0.08 if i % 2 == 0 else 0.0)
+        for i, (v, v_next, name) in enumerate(valid_fracs):
+            ax4.axvline(v, color='green', linestyle='-', alpha=0.3)
+            ax4.axvspan(v, v_next, color='green', alpha=0.08 if i % 2 == 0 else 0.0)
 
-                # Center the text in the *visible* portion of the fraction tube
-                vis_start = max(v, zoom_start)
-                vis_end = min(v_next, zoom_end)
-                mid_v = (vis_start + vis_end) / 2
+            vis_start = max(v, zoom_start)
+            vis_end   = min(v_next, zoom_end)
+            mid_v = (vis_start + vis_end) / 2
 
-                # clip_on=True ensures text doesn't spill past the graph borders
-                ax4.text(mid_v, text_y, name, rotation=90,
-                         ha='center', va='top', fontsize=8, color='darkgreen', clip_on=True)
+            ax4.text(mid_v, text_y, name, rotation=90,
+                     ha='center', va='top', fontsize=8,
+                     color='darkgreen', clip_on=True)
 
     # --- Formatting for all axes ---
     axes_list = [ax1, ax2, ax3]
@@ -609,17 +711,14 @@ def analyze_sec(
         axes_list.append(ax4)
 
     for ax in axes_list:
-        # Add column markers
         if void_volume is not None:
             ax.axvline(void_volume, color='purple', linestyle='--', alpha=0.5, label='Void Vol')
 
-        # ONLY apply full-width xlim to the top three plots
         if ax != ax4:
             ax.set_xlim(plot_start, analysis_window)
 
         ax.set_xlabel("Elution Volume (mL)")
 
-        # Generate clean legends without duplicate labels
         handles, labels = ax.get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
         ax.legend(by_label.values(), by_label.keys(), fontsize='x-small')
@@ -635,30 +734,49 @@ def analyze_sec(
     plt.show()
     plt.close(fig)
 
-    # --- EXPORT TO CSV ---
-    base_name = os.path.splitext(csv_path)[0]
+    # ------------------------------------------------------------------
+    # Export — single write at the end with all columns
+    # ------------------------------------------------------------------
+    base_name   = os.path.splitext(csv_path)[0]
     export_name = f"{base_name}_processed_plot.csv"
 
     export_data = {
-        "Volume_mL": x,
-        "mAU_Raw": y,
-        "mAU_Baseline_Corrected": y_corrected
+        "mL": x_full,
+        "mAU_raw": y_full,
+        "mAU_baseline_corrected": y_full_corrected,
     }
 
+    # Also include the analysis-window fit columns (NaN outside that window)
     if len(interactive_fits) > 0:
-        export_data["mAU_Combined_Fit"] = total_fit_y
+        fit_full = np.full(len(x_full), np.nan)
+        for j, xv in enumerate(x_full):
+            idx = np.searchsorted(x, xv)
+            if 0 <= idx < len(x) and np.isclose(x[min(idx, len(x)-1)], xv, atol=1e-6):
+                fit_full[j] = total_fit_y[min(idx, len(x)-1)]
+
+        # Simpler: just export the analysis-window data separately
+        export_data_fits = {
+            "mL": x,
+            "mAU_raw": y,
+            "mAU_baseline_corrected": y_corrected,
+            "mAU_combined_fit": total_fit_y,
+        }
         for i, fit in enumerate(interactive_fits):
-            export_data[f"mAU_Peak_{i + 1}"] = gaussian(x, *fit)
+            export_data_fits[f"mAU_peak_{i + 1}"] = gaussian(x, *fit)
+
+        fit_export_name = f"{base_name}_peaks_fit.csv"
+        pd.DataFrame(export_data_fits).to_csv(fit_export_name, index=False)
+        print(f"✅ Exported Gaussian fit data to: {fit_export_name}")
 
     pd.DataFrame(export_data).to_csv(export_name, index=False)
-    print(f"✅ Exported data AND model fits to: {export_name}")
+    print(f"✅ Exported full baseline-corrected trace to: {export_name}")
 
     # Build and print the result dataframe
     result_df = pd.DataFrame(
         results,
         columns=[
-            "Peak_Ve_rel (mL)",
-            "Peak_Ve_abs (mL)",
+            "Peak_Ve_rel (mL)",    # Ve relative to void volume
+            "Peak_Ve_abs (mL)",    # Ve after injection-volume subtraction
             "Molecular_Weight (kDa)",
             "Peak_Area",
             "Relative_Abundance (%)",
@@ -667,7 +785,10 @@ def analyze_sec(
     )
 
     print("\n--- FINAL RESULTS ---")
-    print(result_df.to_string(index=False, float_format=lambda x: f"{x:.2f}" if pd.notnull(x) else "NaN"))
+    print(result_df.to_string(
+        index=False,
+        float_format=lambda x: f"{x:.2f}" if pd.notnull(x) else "NaN"
+    ))
 
     return result_df
 
@@ -680,7 +801,7 @@ import argparse
 
 if __name__ == "__main__":
 
-    SCRIPT_VERSION = "2.0.0-multicolumn"
+    SCRIPT_VERSION = "2.1.0-multicolumn"
 
     print(f"\nSEC analysis script version: {SCRIPT_VERSION}\n")
 
@@ -688,6 +809,11 @@ if __name__ == "__main__":
         description="Analyze an analytical SEC chromatogram."
     )
     parser.add_argument("csv_path")
+    parser.add_argument(
+        "--baseline", default="percentile_ends",
+        choices=["percentile_ends", "rolling_minimum", "flat_end"],
+        help="Baseline correction method (default: percentile_ends)"
+    )
     args = parser.parse_args()
 
     print("\nSelect column used:")
@@ -760,6 +886,7 @@ if __name__ == "__main__":
     for k, v in column_cfg.items():
         if k != "calib_points":
             print(f"  {k}: {v}")
+    print(f"  baseline_method: {args.baseline}")
 
     if user_expected_mw is not None:
         print(f"  expected_mw: {user_expected_mw} kDa")
@@ -771,7 +898,7 @@ if __name__ == "__main__":
         calib_points=column_cfg["calib_points"],
         calib_chrom_csv=column_cfg["calib_csv"],
         peak_prominence=2,
-        baseline_fraction=(0.1, 0.3),
+        baseline_method=args.baseline,
         void_volume=column_cfg["void_volume"],
         mu_cutoff=column_cfg["mu_cutoff"],
         pre_void_fraction=column_cfg["pre_void_fraction"],
