@@ -19,10 +19,11 @@ The program fits Gaussian peaks to chromatographic data and calculates molecular
 
 -   **Broad Compatibility:** Robustly auto-detects headers, encodings, and injection volumes from messy ÄKTA CSV exports.
 -   **Configurable Columns:** Easily switch between different SEC columns and calibration profiles via a centralized `columns.py` dictionary.
--   **Fraction Collection Mapping (`main_auto.py`):** Automatically extracts fraction volumes and names, overlaying them onto a dedicated, dynamically zoomed subplot to pinpoint exactly where your target species eluted.
--   **Interactive Fitting:** Click directly on your chromatogram to fit Gaussian models to specific peaks or shoulders.
+-   **Robust Baseline Correction:** Choose between percentile-ends, rolling-minimum, or flat-end baseline estimation methods.
+-   **Interactive Fitting:** Click directly on your chromatogram to fit Gaussian models to specific peaks or shoulders (with undo support).
+-   **Global Deconvolution:** Resolve complex, overlapping peaks with restricted global optimization, area-under-the-curve (AUC) relative abundance, and stoichiometry estimation.
 -   **Molecular Weight Estimation:** Automatically maps fitted peak elution volumes to a standard curve.
--   **Advanced Deconvolution (`main_auto.py`):** Resolve complex, overlapping peaks with restricted global optimization, area-under-the-curve (AUC) relative abundance, and stoichiometry estimation.
+-   **Fraction Collection Mapping:** Automatically extracts fraction volumes and names, overlaying them onto a dedicated, dynamically zoomed subplot to pinpoint exactly where your target species eluted.
 
 ---
 
@@ -30,38 +31,29 @@ The program fits Gaussian peaks to chromatographic data and calculates molecular
 
 Clone the repository and install the required dependencies:
 
-    git clone https://github.com/james-r-barrett/SEC_Fit
-    cd SEC_Fit
+    git clone https://github.com/james-r-barrett/SEC_fit
+    cd SEC_fit
     pip install -r requirements.txt
 
 ---
 
 ## Usage
 
-This repository contains two main analytical scripts depending on your needs. Both are executed via the command line:
+Run the analysis script from the command line, pointing it at a chromatogram exported from your ÄKTA system:
 
-    python <script_name>.py trace.csv
+    python main_auto.py trace.csv
 
-Where `trace.csv` is the chromatogram exported from the ÄKTA system.
+Optionally, choose a baseline correction method (default is `percentile_ends`):
 
-### Option 1: Standard Analysis (`main.py`)
-Best for quick, single-peak analysis or well-separated species.
+    python main_auto.py trace.csv --baseline rolling_minimum
 
-1.  **Initialization:** The script reads the CSV, auto-detects the injection volumes, and prompts you to select the appropriate column and injection run.
-2.  **Interactive Selection:** A plot opens showing your baseline-corrected chromatogram. Click the apex of any peaks you wish to fit. The script will fit and display individual Gaussian curves instantly. Close the window when finished.
-3.  **Results:** A single unified plot displays your data, the Gaussian fits, text annotations for the calculated mass, and an overlay of the calibration chromatogram.
-4.  **Export:** Automatically saves a basic `_processed_plot.csv` containing the full elution volume and baseline-corrected absorbance for external plotting.
-
-### Option 2: Advanced Deconvolution (`main_auto.py`)
-Best for overlapping peaks, quantifying relative abundance, estimating oligomeric states, and fraction mapping.
-
-1.  **Initialization:** Select your column and injection run as usual. 
+1.  **Initialization:** Select your column and injection run.
 2.  **Stoichiometry (Optional):** Enter the expected molecular weight of your monomer (in kDa) to calculate oligomeric states (n), or press Enter to skip.
 3.  **Fraction Mapping (Optional):** If fraction data is detected in your CSV, you will be prompted to plot them on an additional zoomed-in panel.
-4.  **Interactive Selection:** Click the peaks you want to fit.
-5.  **Global Refinement:** Upon closing the window, the script applies a restricted global optimization algorithm to fit all selected Gaussians *simultaneously*, properly deconvoluting overlapping areas.
-6.  **Results:** Generates a publication-style 3-panel (or 4-panel) figure showing the raw data with text annotations (Mass, Volume, Relative Abundance %, and Stoichiometry), a normalized calibration overlay, the isolated Gaussian models, and a dynamically zoomed fraction collection overlay.
-7.  **Export:** Saves an advanced `_modeled_peaks.csv` containing the raw data, baseline-corrected data, the combined additive fit, and the isolated curves for every individual modeled peak, alongside a `_full_trace.csv` for the entire run.
+4.  **Interactive Selection:** Left-click to fit a peak, right-click to undo the last fit, press Enter when finished.
+5.  **Global Refinement:** Upon finishing, the script applies a restricted global optimization algorithm to fit all selected Gaussians *simultaneously*, properly deconvoluting overlapping areas.
+6.  **Results:** Generates a publication-style 3-panel (or 4-panel, with fractions) figure showing the raw data with text annotations (Mass, Volume, Relative Abundance %, and Stoichiometry), a normalized calibration overlay, the isolated Gaussian models, and (optionally) a dynamically zoomed fraction collection overlay.
+7.  **Export:** Saves `_processed_plot.csv` (the full baseline-corrected trace), `_peaks_fit.csv` (the analysis-window data with the combined and individual Gaussian fits), and, if selected, `_final_plot.pdf`.
 
 ---
 
@@ -69,14 +61,14 @@ Best for overlapping peaks, quantifying relative abundance, estimating oligomeri
 **Interactive Peak Selection:**
 ![Raw SEC Trace](screenshots/auto_step1.png)
 
-**Final Deconvoluted Output (`main_auto.py`):**
+**Final Deconvoluted Output:**
 ![Fitted Peaks](screenshots/auto_step2a.png)
 
 ---
 
 ## Calibration Information
 
-The repository includes a `calibration.csv` file generated from a calibration run using the Sigma Aldrich Gel Filtration Calibration Kit (Product: 69385).
+The repository includes calibration CSV files generated from calibration runs using the Sigma Aldrich Gel Filtration Calibration Kit (Product: 69385).
 
 ### Example Column Used
 Superdex 200 Increase 10/300 GL

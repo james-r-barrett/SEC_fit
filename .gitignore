@@ -1,0 +1,15 @@
+# OS / editor cruft
+.DS_Store
+__pycache__/
+*.pyc
+
+# Generated analysis outputs (produced by running main_auto.py)
+*_processed_plot.csv
+*_peaks_fit.csv
+*_final_plot.pdf
+*_full_trace.csv
+*_modeled_peaks.csv
+
+# Raw chromatogram exports and other experimental/development data
+*.asc
+*.xlsx
